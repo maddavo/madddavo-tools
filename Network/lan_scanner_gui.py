@@ -451,8 +451,8 @@ def scan_one_host(ip: str, ports: list[int]) -> ScanResult | None:
 class LanScannerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("LAN Scanner")
-        self.root.geometry("1250x650")
+        self.root.title("MadDavo's LAN Scanner")
+        self.root.geometry("1250x720")
 
         self.queue = queue.Queue()
         self.scanning = False
