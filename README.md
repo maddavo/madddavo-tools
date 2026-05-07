@@ -1,4 +1,4 @@
-# MaddDavo Tools
+# MadDavo Tools
 A collection of Python scripts that I find useful
 
 ## lan_scanner_gui.py
