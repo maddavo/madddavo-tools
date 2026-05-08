@@ -1,0 +1,1 @@
+powershell -ExecutionPolicy Bypass -File D:\Scripts\rollback_photos.ps1
