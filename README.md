@@ -14,3 +14,20 @@ address, enriched afterward with ARP/MAC and OUI/vendor information
 where available, and can be exported to CSV for later reference.
 
 `lanscan` simply calls wpython to run lan_scanner_gui in a process.
+
+## rollback_photos.ps1 / rollback_photos.bat
+Ah, don't you love it when Microsoft takes something that has been
+solid, reliable and completely XXXX's it up? Say hello to Microsoft
+Photos. An update released on 14th March 2026 diverged the path of
+this photo viewing/editing app. The 'new' version with new workflow
+basically screwed everyone up so they released Photos Legacy and users
+then had a choice to use the new or the legacy. But of course what
+MS didn't account for was that both are XXXX compared with the
+brain-dead yet reliable old 2024 version. So in a fit of frustration
+I wrote this script to rollback Photos to the earlier version which
+of course was still on my PC due to Microsoft's leaky clean up
+policy.
+
+To use: DISABLE Microsoft Store automatic updates (which I could only
+do for five weeks max). Then use the batch file to run the PowerShell
+script.
