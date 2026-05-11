@@ -1,4 +1,5 @@
 # LAN Scanner with TP-Link AX72 Router Integration
+v1.16 2026 by MadDavo
 
 A Windows Python GUI tool for scanning a local IPv4 network, identifying
 responding devices, enriching results with router DHCP data, and managing
@@ -147,7 +148,7 @@ Modern Windows 10/11 installations usually include this.
 
 ## Files
 
-Recommended directory:
+Recommended directory (just where I have it, put it wherever you like):
 
 ```text
 D:\Scripts\Network
@@ -240,55 +241,6 @@ such as:
 - common alternate web ports
 
 The TCP port list can be edited in the GUI and is remembered between runs.
-
-## Privacy and Repository Notes
-
-Safe to commit:
-
-```text
-lan_scanner_gui.py
-router_tplink_ax72.py
-README.md
-requirements.txt
-.gitignore
-router_config.example.json
-```
-
-Do not commit:
-
-```text
-router_config.json
-lan_scanner_gui_memory.json
-lan_scan_*.csv
-router capture files
-browser screenshots
-router session tokens
-router JavaScript captures
-```
-
-Suggested `.gitignore`:
-
-```gitignore
-# Local credentials
-router_config.json
-
-# Local LAN inventory and app memory
-lan_scanner_gui_memory.json
-lan_scan_memory.json
-
-# Exports
-lan_scan_*.csv
-*.csv
-
-# Captures / temporary diagnostics
-Downloads.zip
-chrome_*.png
-Pasted text.txt
-
-# Python cache
-__pycache__/
-*.pyc
-```
 
 ## Safety Notes
 
