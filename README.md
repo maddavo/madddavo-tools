@@ -2,16 +2,30 @@
 A collection of Python scripts that I find useful
 
 ## lan_scanner_gui.py / lanscan
+The origin of this script was a replacement for Fing.  I needed something
+to just scan my network that was small, light, no fuss.  Then things
+kinda blew up.
+
 This script provides a Windows GUI LAN scanner for quickly identifying
 active devices on a local IPv4 subnet, defaulting to 192.168.0.0/24.
 It scans each host using ICMP ping and common TCP port checks, then
 displays responding devices in a table with IP address, ping status,
-open ports, DNS name, NetBIOS name, MAC address, likely manufacturer,
-and a short inferred summary such as web UI, SMB/NAS, printer, RTSP
-camera, MQTT/IoT, RDP, SSH, or ADB/Android/Fire TV. Results are
-populated progressively while scanning, kept numerically sorted by IP
-address, enriched afterward with ARP/MAC and OUI/vendor information
-where available, and can be exported to CSV for later reference.
+open ports, DNS name, MAC address, and a short inferred summary such
+as web UI, SMB/NAS, printer, RTSP camera, MQTT/IoT, RDP, SSH, or
+ADB/Android/Fire TV. Results are populated progressively while
+scanning, kept numerically sorted by IP address, enriched afterward
+with ARP/MAC and OUI/vendor information where available, and can be
+exported to CSV for later reference.
+
+But wait, there's more.  The DHCP admin interface on my router is WOEFUL.
+So I thought, hey I hate going back and forth from this list to my web
+browser, can't I just script the bejebus out of this?  And so yeah, that
+happened.  I went down a rabbit hole and came up with this very very
+specific tool for my router.  Does it support any other routers? No. But
+it could if one needed to - there's a facility to use an as yet unwritten
+plugin.  So at some point when this router inevitably blows up then I'll
+be writing another extension for this.  For all the features of this tool
+see the separate README.
 
 `lanscan` simply calls wpython to run lan_scanner_gui in a process.
 
