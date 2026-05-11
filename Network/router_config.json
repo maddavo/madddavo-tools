@@ -1,0 +1,12 @@
+{
+  "selected_router": "home_ax72",
+  "routers": {
+    "home_ax72": {
+      "type": "tplink_archer_ax72",
+      "label": "Home TP-Link AX72",
+      "base_url": "http://192.168.0.1",
+      "password": "",
+      "password_storage": "plaintext"
+    }
+  }
+}
