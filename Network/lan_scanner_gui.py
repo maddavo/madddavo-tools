@@ -1,16 +1,18 @@
 # This script provides a Windows GUI LAN scanner for quickly identifying
-# active devices on a local IPv4 subnet, defaulting to 192.168.0.0/24.
+# active devices on a local IPv4 subnet, defaulting to 192.168.0.0/23.
 # It scans each host using ICMP ping and common TCP port checks, then
-# displays responding devices in a table with IP address, ping status,
-# open ports, DNS name, NetBIOS name, MAC address, likely manufacturer,
-# and a short inferred summary such as web UI, SMB/NAS, printer, RTSP
-# camera, MQTT/IoT, RDP, SSH, or ADB/Android/Fire TV. Results are
-# populated progressively while scanning, kept numerically sorted by IP
-# address, enriched afterward with ARP/MAC and OUI/vendor information
-# where available, and can be exported to CSV for later reference.
+# displays remembered/responding devices in a table with IP address,
+# ping status, open ports, DNS name, NetBIOS name, MAC address, likely
+# manufacturer, and a short inferred summary such as web UI, SMB/NAS,
+# printer, RTSP camera, MQTT/IoT, RDP, SSH, or ADB/Android/Fire TV.
+# Results are populated progressively while scanning, kept numerically
+# sorted by IP address, enriched afterward with ARP/MAC and OUI/vendor
+# information where available, saved as local JSON working memory, and
+# can be exported to CSV for later reference.
 
 import csv
 import ipaddress
+import json
 import os
 import queue
 import re
@@ -19,14 +21,18 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
-DEFAULT_TARGET = "192.168.0.X"
+DEFAULT_TARGET = "192.168.0.0/23"
+MEMORY_FILENAME = "lan_scanner_gui_memory.json"
+MEMORY_VERSION = 1
 
 DEFAULT_PORTS = (
     "21,22,23,25,53,80,110,139,143,443,445,548,554,587,"
@@ -130,6 +136,7 @@ class ScanResult:
     mac: str = ""
     vendor: str = ""
     summary: str = ""
+    scanned_at: float = 0.0
 
 
 def parse_target_to_network(text: str) -> ipaddress.IPv4Network:
@@ -349,6 +356,71 @@ def format_ports(ports: list[int]) -> str:
     return ", ".join(parts)
 
 
+def web_url_for_result(result: ScanResult) -> str:
+    ports = set(result.open_ports)
+
+    # Prefer normal ports first.
+    if 443 in ports:
+        return f"https://{result.ip}"
+
+    if 80 in ports:
+        return f"http://{result.ip}"
+
+    # Then common alternate web ports.
+    if 8443 in ports:
+        return f"https://{result.ip}:8443"
+
+    for port in (8080, 8000, 5000):
+        if port in ports:
+            return f"http://{result.ip}:{port}"
+
+    return ""
+
+
+def memory_path() -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, MEMORY_FILENAME)
+
+
+def result_to_record(result: ScanResult) -> dict:
+    return {
+        "ip": result.ip,
+        "ping": result.ping,
+        "open_ports": list(result.open_ports),
+        "dns_name": result.dns_name,
+        "netbios_name": result.netbios_name,
+        "mac": result.mac,
+        "vendor": result.vendor,
+        "summary": result.summary,
+        "scanned_at": result.scanned_at,
+    }
+
+
+def result_from_record(record: dict) -> ScanResult | None:
+    try:
+        ip = str(ipaddress.ip_address(str(record.get("ip", ""))))
+    except ValueError:
+        return None
+
+    try:
+        open_ports = [int(port) for port in record.get("open_ports", [])]
+        open_ports = [port for port in open_ports if 1 <= port <= 65535]
+    except Exception:
+        open_ports = []
+
+    return ScanResult(
+        ip=ip,
+        ping=bool(record.get("ping", False)),
+        open_ports=sorted(set(open_ports)),
+        dns_name=str(record.get("dns_name", "") or ""),
+        netbios_name=str(record.get("netbios_name", "") or ""),
+        mac=str(record.get("mac", "") or ""),
+        vendor=str(record.get("vendor", "") or ""),
+        summary=str(record.get("summary", "") or ""),
+        scanned_at=float(record.get("scanned_at", 0.0) or 0.0),
+    )
+
+
 def build_summary(result: ScanResult) -> str:
     ports = set(result.open_ports)
     hints = []
@@ -417,8 +489,10 @@ def build_summary(result: ScanResult) -> str:
     if not hints:
         if result.ping:
             hints.append("ping response only")
-        else:
+        elif result.open_ports:
             hints.append("TCP response")
+        else:
+            hints.append("no response on last scan")
 
     return "; ".join(dict.fromkeys(hints))
 
@@ -434,7 +508,12 @@ def scan_one_host(ip: str, ports: list[int]) -> ScanResult | None:
     if not ping_ok and not open_ports:
         return None
 
-    result = ScanResult(ip=ip, ping=ping_ok, open_ports=open_ports)
+    result = ScanResult(
+        ip=ip,
+        ping=ping_ok,
+        open_ports=open_ports,
+        scanned_at=time.time(),
+    )
 
     result.dns_name = reverse_dns(ip)
 
@@ -459,8 +538,36 @@ class LanScannerApp:
         self.last_rows: list[ScanResult] = []
         self.ip_to_item = {}
         self.results_by_ip = {}
+        self.age_icons = self._create_age_icons()
 
         self._build_ui()
+        self.load_memory()
+        self.root.after(60000, self.refresh_age_indicators)
+
+    def _create_age_icons(self) -> dict[str, tk.PhotoImage]:
+        colours = {
+            "green": "#19a64a",
+            "yellow": "#d8a800",
+            "red": "#cf3030",
+        }
+        icons = {}
+
+        for name, colour in colours.items():
+            image = tk.PhotoImage(width=14, height=14)
+            cx = cy = 7
+            radius = 4.8
+
+            for x in range(14):
+                for y in range(14):
+                    distance = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                    if distance <= radius:
+                        image.put(colour, (x, y))
+                    elif radius < distance <= radius + 1.0:
+                        image.put("#555555", (x, y))
+
+            icons[name] = image
+
+        return icons
 
     def _build_ui(self):
         outer = ttk.Frame(self.root, padding=10)
@@ -487,8 +594,19 @@ class LanScannerApp:
             expand=True,
         )
 
-        self.scan_button = ttk.Button(controls, text="Scan", command=self.start_scan)
-        self.scan_button.pack(side=tk.LEFT)
+        self.full_scan_button = ttk.Button(
+            controls,
+            text="Full Scan",
+            command=lambda: self.start_scan("full"),
+        )
+        self.full_scan_button.pack(side=tk.LEFT)
+
+        self.missing_scan_button = ttk.Button(
+            controls,
+            text="Scan missing",
+            command=lambda: self.start_scan("missing"),
+        )
+        self.missing_scan_button.pack(side=tk.LEFT, padx=(8, 0))
 
         self.export_button = ttk.Button(controls, text="Export CSV", command=self.export_csv)
         self.export_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -513,8 +631,9 @@ class LanScannerApp:
             "summary",
         )
 
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="tree headings")
 
+        self.tree.heading("#0", text="")
         self.tree.heading("ip", text="IP address")
         self.tree.heading("ping", text="Ping")
         self.tree.heading("ports", text="Open TCP ports")
@@ -524,6 +643,7 @@ class LanScannerApp:
         self.tree.heading("vendor", text="Manufacturer")
         self.tree.heading("summary", text="Summary")
 
+        self.tree.column("#0", width=28, minwidth=28, stretch=False, anchor=tk.CENTER)
         self.tree.column("ip", width=110, anchor=tk.W)
         self.tree.column("ping", width=60, anchor=tk.CENTER)
         self.tree.column("ports", width=230, anchor=tk.W)
@@ -537,6 +657,9 @@ class LanScannerApp:
         xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
 
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.tree.bind("<Double-1>", self.open_selected_web_ui)
+        self.tree.bind("<Button-3>", self.show_row_context_menu)
+        self.tree.bind("<Button-2>", self.show_row_context_menu)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
@@ -545,7 +668,11 @@ class LanScannerApp:
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-    def start_scan(self):
+    def set_scan_buttons(self, state: str):
+        self.full_scan_button.configure(state=state)
+        self.missing_scan_button.configure(state=state)
+
+    def start_scan(self, mode: str = "full"):
         if self.scanning:
             return
 
@@ -560,7 +687,8 @@ class LanScannerApp:
             messagebox.showerror("Invalid subnet", "Only IPv4 networks are supported.")
             return
 
-        host_count = network.num_addresses - 2 if network.prefixlen < 31 else network.num_addresses
+        all_hosts = [str(ip) for ip in network.hosts()]
+        host_count = len(all_hosts)
 
         if host_count <= 0:
             messagebox.showerror("Invalid subnet", "No usable hosts in that network.")
@@ -573,31 +701,53 @@ class LanScannerApp:
             )
             return
 
-        self.tree.delete(*self.tree.get_children())
+        if mode == "missing":
+            target_ips = [ip for ip in all_hosts if ip not in self.results_by_ip]
+            scan_label = "Scan missing"
+            known_ips = set(self.results_by_ip.keys())
+        else:
+            # A full scan refreshes the whole list. Remembered rows are cleared
+            # immediately, then the table is repopulated with responding hosts
+            # from the current scan only.
+            target_ips = all_hosts
+            scan_label = "Full scan"
+            known_ips = set()
+            self.tree.delete(*self.tree.get_children())
+            self.last_rows = []
+            self.ip_to_item = {}
+            self.results_by_ip = {}
+
+        if not target_ips:
+            self.progress["value"] = 0
+            self.progress["maximum"] = 1
+            self.status_var.set(f"{scan_label}: no addresses to scan.")
+            return
+
         self.progress["value"] = 0
-        self.progress["maximum"] = host_count
-        self.status_var.set(f"Scanning {network}...")
-        self.scan_button.configure(state=tk.DISABLED)
+        self.progress["maximum"] = len(target_ips)
+        self.status_var.set(f"{scan_label}: scanning {len(target_ips)} address(es)...")
+        self.set_scan_buttons(tk.DISABLED)
 
         self.scanning = True
-        self.last_rows = []
-        self.ip_to_item = {}
-        self.results_by_ip = {}
 
         thread = threading.Thread(
             target=self._scan_worker,
-            args=(network, ports),
+            args=(target_ips, ports, known_ips, scan_label),
             daemon=True,
         )
         thread.start()
 
         self.root.after(100, self._process_queue)
 
-    def _scan_worker(self, network: ipaddress.IPv4Network, ports: list[int]):
+    def _scan_worker(
+        self,
+        target_ips: list[str],
+        ports: list[int],
+        known_ips: set[str],
+        scan_label: str,
+    ):
         started = time.time()
-        hosts = [str(ip) for ip in network.hosts()]
-
-        max_workers = min(128, max(16, len(hosts)))
+        max_workers = min(128, max(16, len(target_ips)))
 
         results: list[ScanResult] = []
         completed = 0
@@ -606,10 +756,11 @@ class LanScannerApp:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(scan_one_host, ip, ports): ip
-                    for ip in hosts
+                    for ip in target_ips
                 }
 
                 for future in as_completed(futures):
+                    ip = futures[future]
                     completed += 1
 
                     try:
@@ -621,17 +772,22 @@ class LanScannerApp:
                             # Populate the table immediately while scanning.
                             self.queue.put(("found", result))
 
+                        elif ip in known_ips:
+                            # Existing remembered rows remain visible but are
+                            # marked as checked with no response.
+                            self.queue.put(("missed", ip, time.time()))
+
                     except Exception:
                         pass
 
-                    self.queue.put(("progress", completed, len(hosts), len(results)))
+                    self.queue.put(("progress", completed, len(target_ips), len(results), scan_label))
 
             # MAC/manufacturer data is usually most reliable after ARP has been populated.
             arp_table = get_arp_table()
             oui_db = load_oui_database()
 
             for result in results:
-                result.mac = arp_table.get(result.ip, "")
+                result.mac = arp_table.get(result.ip, result.mac)
                 result.vendor = vendor_from_mac(result.mac, oui_db) if result.mac else ""
                 result.summary = build_summary(result)
 
@@ -641,7 +797,7 @@ class LanScannerApp:
             results.sort(key=lambda r: ipaddress.ip_address(r.ip))
 
             elapsed = time.time() - started
-            self.queue.put(("done", results, elapsed))
+            self.queue.put(("done", results, elapsed, scan_label, len(target_ips)))
 
         except Exception as e:
             self.queue.put(("error", str(e)))
@@ -658,7 +814,27 @@ class LanScannerApp:
             row.summary,
         )
 
+    def _age_key(self, row: ScanResult) -> str:
+        if not row.scanned_at:
+            return "red"
+
+        age_seconds = time.time() - row.scanned_at
+
+        if age_seconds <= 3600:
+            return "green"
+
+        if age_seconds <= 86400:
+            return "yellow"
+
+        return "red"
+
+    def _age_icon(self, row: ScanResult) -> tk.PhotoImage:
+        return self.age_icons[self._age_key(row)]
+
     def _insert_or_update_sorted(self, row: ScanResult):
+        if not row.summary:
+            row.summary = build_summary(row)
+
         self.results_by_ip[row.ip] = row
 
         self.last_rows = sorted(
@@ -667,11 +843,12 @@ class LanScannerApp:
         )
 
         values = self._row_values(row)
+        icon = self._age_icon(row)
 
         existing_item = self.ip_to_item.get(row.ip)
 
         if existing_item and self.tree.exists(existing_item):
-            self.tree.item(existing_item, values=values)
+            self.tree.item(existing_item, values=values, image=icon)
             return
 
         row_ip = ipaddress.ip_address(row.ip)
@@ -690,8 +867,28 @@ class LanScannerApp:
                 insert_index = index
                 break
 
-        new_item = self.tree.insert("", insert_index, values=values)
+        new_item = self.tree.insert("", insert_index, text="", image=icon, values=values)
         self.ip_to_item[row.ip] = new_item
+
+    def mark_known_host_missed(self, ip: str, scanned_at: float):
+        current = self.results_by_ip.get(ip)
+
+        if not current:
+            return
+
+        missed = ScanResult(
+            ip=current.ip,
+            ping=False,
+            open_ports=[],
+            dns_name=current.dns_name,
+            netbios_name=current.netbios_name,
+            mac=current.mac,
+            vendor=current.vendor,
+            summary="no response on last scan",
+            scanned_at=scanned_at,
+        )
+
+        self._insert_or_update_sorted(missed)
 
     def _process_queue(self):
         try:
@@ -700,37 +897,47 @@ class LanScannerApp:
                 kind = message[0]
 
                 if kind == "progress":
-                    completed, total, found = message[1], message[2], message[3]
+                    completed, total, found, scan_label = message[1], message[2], message[3], message[4]
 
                     self.progress["maximum"] = total
                     self.progress["value"] = completed
 
                     self.status_var.set(
-                        f"Scanning... {completed}/{total} checked, {found} responding"
+                        f"{scan_label}: {completed}/{total} checked, {found} responding"
                     )
 
                 elif kind == "found":
                     row = message[1]
                     self._insert_or_update_sorted(row)
 
+                elif kind == "missed":
+                    ip, scanned_at = message[1], message[2]
+                    self.mark_known_host_missed(ip, scanned_at)
+
                 elif kind == "update":
                     row = message[1]
                     self._insert_or_update_sorted(row)
 
                 elif kind == "done":
-                    rows, elapsed = message[1], message[2]
-                    self.last_rows = rows
-
-                    self.status_var.set(
-                        f"Done. {len(rows)} responding host(s). Elapsed: {elapsed:.1f} s"
+                    rows, elapsed, scan_label, scanned_count = message[1], message[2], message[3], message[4]
+                    self.last_rows = sorted(
+                        self.results_by_ip.values(),
+                        key=lambda r: ipaddress.ip_address(r.ip),
                     )
 
-                    self.scan_button.configure(state=tk.NORMAL)
+                    self.save_memory()
+
+                    self.status_var.set(
+                        f"{scan_label} done. {len(rows)} responding from "
+                        f"{scanned_count} scanned. Elapsed: {elapsed:.1f} s"
+                    )
+
+                    self.set_scan_buttons(tk.NORMAL)
                     self.scanning = False
 
                 elif kind == "error":
                     self.status_var.set("Error")
-                    self.scan_button.configure(state=tk.NORMAL)
+                    self.set_scan_buttons(tk.NORMAL)
                     self.scanning = False
                     messagebox.showerror("Scan error", message[1])
 
@@ -739,6 +946,221 @@ class LanScannerApp:
 
         if self.scanning:
             self.root.after(100, self._process_queue)
+
+    def refresh_age_indicators(self):
+        for ip, item_id in list(self.ip_to_item.items()):
+            row = self.results_by_ip.get(ip)
+            if row and self.tree.exists(item_id):
+                self.tree.item(item_id, image=self._age_icon(row))
+
+        self.root.after(60000, self.refresh_age_indicators)
+
+    def load_memory(self):
+        path = memory_path()
+
+        if not os.path.exists(path):
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            rows = []
+            for record in data.get("rows", []):
+                row = result_from_record(record)
+                if row:
+                    rows.append(row)
+
+            rows.sort(key=lambda r: ipaddress.ip_address(r.ip))
+
+            for row in rows:
+                self._insert_or_update_sorted(row)
+
+            if rows:
+                self.status_var.set(f"Ready. Loaded {len(rows)} remembered row(s).")
+
+        except Exception as e:
+            self.status_var.set(f"Ready. Could not load memory file: {e}")
+
+    def save_memory(self):
+        rows = sorted(
+            self.results_by_ip.values(),
+            key=lambda r: ipaddress.ip_address(r.ip),
+        )
+
+        data = {
+            "version": MEMORY_VERSION,
+            "saved_at": time.time(),
+            "rows": [result_to_record(row) for row in rows],
+        }
+
+        path = memory_path()
+        temp_path = path + ".tmp"
+
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+
+            os.replace(temp_path, path)
+
+        except Exception as e:
+            self.status_var.set(f"Could not save memory file: {e}")
+
+    def selected_result(self) -> ScanResult | None:
+        selected = self.tree.selection()
+
+        if not selected:
+            return None
+
+        item_id = selected[0]
+        ip = self.tree.set(item_id, "ip")
+
+        return self.results_by_ip.get(ip)
+
+    def show_row_context_menu(self, event):
+        item_id = self.tree.identify_row(event.y)
+
+        if not item_id:
+            return
+
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+
+        result = self.selected_result()
+
+        if not result:
+            return
+
+        ports = set(result.open_ports)
+        has_mac = bool(result.mac)
+        has_web = bool(web_url_for_result(result))
+        has_ssh = 22 in ports
+        has_smb = bool(ports & {139, 445})
+        can_rescan = not self.scanning
+
+        menu = tk.Menu(self.root, tearoff=0)
+
+        menu.add_command(
+            label="Rescan",
+            command=self.rescan_selected_host,
+            state=tk.NORMAL if can_rescan else tk.DISABLED,
+        )
+
+        menu.add_command(
+            label="Copy MAC Address",
+            command=self.copy_selected_mac,
+            state=tk.NORMAL if has_mac else tk.DISABLED,
+        )
+
+        menu.add_separator()
+
+        menu.add_command(
+            label="Open in Browser",
+            command=self.open_selected_web_ui,
+            state=tk.NORMAL if has_web else tk.DISABLED,
+        )
+
+        menu.add_command(
+            label="SSH",
+            command=self.ssh_selected_host,
+            state=tk.NORMAL if has_ssh else tk.DISABLED,
+        )
+
+        menu.add_command(
+            label="Open in Explorer",
+            command=self.open_selected_smb,
+            state=tk.NORMAL if has_smb else tk.DISABLED,
+        )
+
+        menu.tk_popup(event.x_root, event.y_root)
+        menu.grab_release()
+
+    def copy_selected_mac(self):
+        result = self.selected_result()
+
+        if not result or not result.mac:
+            return
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(result.mac)
+        self.status_var.set(f"Copied MAC address for {result.ip}: {result.mac}")
+
+    def open_selected_web_ui(self, event=None):
+        result = self.selected_result()
+
+        if not result:
+            return
+
+        url = web_url_for_result(result)
+
+        if not url:
+            messagebox.showinfo(
+                "No web UI detected",
+                f"No recognised web UI port is open on {result.ip}.",
+            )
+            return
+
+        webbrowser.open(url)
+
+    def ssh_selected_host(self):
+        result = self.selected_result()
+
+        if not result or 22 not in result.open_ports:
+            return
+
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/k", "ssh", result.ip],
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+        except Exception as e:
+            messagebox.showerror("SSH failed", str(e))
+
+    def open_selected_smb(self):
+        result = self.selected_result()
+
+        if not result or not (set(result.open_ports) & {139, 445}):
+            return
+
+        unc_path = f"\\\\{result.ip}"
+
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(unc_path)
+            else:
+                subprocess.Popen(["explorer.exe", unc_path])
+        except Exception as e:
+            messagebox.showerror("Explorer failed", str(e))
+
+    def rescan_selected_host(self):
+        if self.scanning:
+            return
+
+        result = self.selected_result()
+
+        if not result:
+            return
+
+        try:
+            ports = parse_ports(self.ports_var.get())
+        except Exception as e:
+            messagebox.showerror("Invalid scan settings", str(e))
+            return
+
+        self.progress["value"] = 0
+        self.progress["maximum"] = 1
+        self.status_var.set(f"Rescan: scanning {result.ip}...")
+        self.set_scan_buttons(tk.DISABLED)
+        self.scanning = True
+
+        thread = threading.Thread(
+            target=self._scan_worker,
+            args=([result.ip], ports, {result.ip}, "Rescan"),
+            daemon=True,
+        )
+        thread.start()
+
+        self.root.after(100, self._process_queue)
 
     def export_csv(self):
         if not self.last_rows:
